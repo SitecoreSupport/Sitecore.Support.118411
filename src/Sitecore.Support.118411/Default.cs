@@ -103,7 +103,7 @@ namespace Sitecore.Support.sitecore.login
             return false;
         }
         
-        protected void LoginClicked(object sender, EventArgs e)
+        protected new void LoginClicked(object sender, EventArgs e)
         {
             if (!this.LoggingIn())
             {
