@@ -11,6 +11,7 @@ using Sitecore.Text;
 using Sitecore.Web;
 using Sitecore.Web.Authentication;
 using Sitecore.Security.Authentication;
+using System.Text.RegularExpressions;
 using System;
 using System.Web;
 
@@ -40,6 +41,14 @@ namespace Sitecore.Support.sitecore.login
                 Settings.ClientLanguage
             });
 
+            /*
+                ALEX20170815:
+                Query string "sc_lang" has caused the issue by redirecting user to the page following their ClientLanguage setting even though the URL contains different language.
+                This solution is to prevent adding the query string "sc_lang".
+                    e.g. <sitecoreInstance>/ja-jp?sc_mode=edit   <-- (don't add the "sc_lang" query string here)
+
+                "ForceClientLanguageOnLogin" setting is added by this patch with "false" value to prevent using the ClientLanguage.
+            */
             bool flag = true;
             if (!string.IsNullOrEmpty(this.Context.Request.QueryString.ToString()) && Settings.GetSetting("ForceClientLanguageOnLogin") == "false")
             {
@@ -47,7 +56,7 @@ namespace Sitecore.Support.sitecore.login
             }
 
             UrlString urlString = new UrlString(text);
-            if (string.IsNullOrEmpty(urlString["sc_lang"]) & flag)
+            if (string.IsNullOrEmpty(urlString["sc_lang"]) && flag)
             {
                 urlString["sc_lang"] = @string;
             }
@@ -57,7 +66,7 @@ namespace Sitecore.Support.sitecore.login
                 Log.Audit(this, "Login", new string[0]);
             }
         }
-
+        
         protected override bool LoggingIn()
         {
             if (string.IsNullOrWhiteSpace(this.UserName.Text))
@@ -68,14 +77,25 @@ namespace Sitecore.Support.sitecore.login
             this.startUrl = WebUtil.GetQueryString("returnUrl");
             this.FailureHolder.Visible = false;
             this.SuccessHolder.Visible = false;
+
+            if (Settings.Login.RememberLastLoggedInUserName)
+            {
+                Default.WriteCookie(WebUtil.GetLoginCookieName(), this.UserName.Text);
+            }
+
             LoggingInArgs loggingInArgs = new LoggingInArgs
             {
                 Username = this.fullUserName,
                 Password = this.Password.Text,
                 StartUrl = this.startUrl
             };
-            
             Pipeline.Start("loggingin", loggingInArgs);
+            bool flag = UIUtil.IsIE() || UIUtil.IsIE11();
+            if (flag && !Regex.IsMatch(WebUtil.GetHostName(), Settings.HostNameValidationPattern, RegexOptions.ECMAScript))
+            {
+                this.RenderError(Translate.Text("Your login attempt was not successful because the URL hostname contains invalid character(s) that are not recognized by IE. Please check the URL hostname or try another browser."));
+                return false;
+            }
             if (!loggingInArgs.Success)
             {
                 Log.Audit(string.Format("Login failed: {0}.", loggingInArgs.Username), this);
@@ -86,10 +106,6 @@ namespace Sitecore.Support.sitecore.login
                 return false;
             }
             this.startUrl = loggingInArgs.StartUrl;
-            if (Settings.Login.RememberLastLoggedInUserName)
-            {
-                Default.WriteCookie(WebUtil.GetLoginCookieName(), this.UserName.Text);
-            }
             return true;
         }
         
@@ -117,56 +133,13 @@ namespace Sitecore.Support.sitecore.login
             this.CheckDomainGuard();
             WebUtil.Redirect(this.startUrl);
         }
-        
-        protected override void OnInit(EventArgs e)
-        {
-            try
-            {
-                base.Response.Headers.Add("X-Frame-Options", "SAMEORIGIN");
-            }
-            catch (PlatformNotSupportedException ex)
-            {
-                Log.Error("Setting response headers is not supported.", ex, this);
-            }
-            if (Sitecore.Context.User.IsAuthenticated)
-            {
-                if (WebUtil.GetQueryString("inv") == "1")
-                {
-                    Boost.Invalidate();
-                }
-                if (!DomainAccessGuard.GetAccess())
-                {
-                    base.Response.Redirect(WebUtil.GetFullUrl("/sitecore/client/Applications/LicenseOptions/StartPage"));
-                    return;
-                }
-            }
-            this.DataBind();
-            if (Settings.Login.DisableRememberMe)
-            {
-                this.LoginForm.Attributes.Add("autocomplete", "off");
-            }
-            if (!base.IsPostBack && Settings.Login.RememberLastLoggedInUserName)
-            {
-                string cookieValue = WebUtil.GetCookieValue(WebUtil.GetLoginCookieName());
-                if (!string.IsNullOrEmpty(cookieValue))
-                {
-                    MachineKeyEncryption.TryDecode(cookieValue, out cookieValue);
-                    this.UserName.Text = cookieValue;
-                    this.UserNameForgot.Text = cookieValue;
-                }
-            }
-            try
-            {
-                base.Response.Headers.Add("SC-Login", "true");
-            }
-            catch (PlatformNotSupportedException ex2)
-            {
-                Log.Error("Setting response headers is not supported.", ex2, this);
-            }
-            this.RenderSdnInfoPage();
-            base.OnInit(e);
-        }
 
+        private void LogMaxEditorsExceeded()
+        {
+            string format = "The maximum number of simultaneously active (logged-in) editors exceeded. The User {0} cannot be logged in to the system. The maximum of editors allowed by license is {1}.";
+            Log.Warn(string.Format(format, this.fullUserName, DomainAccessGuard.MaximumSessions), this);
+        }
+        
         private static void WriteCookie(string name, string value)
         {
             Assert.ArgumentNotNull(name, "name");
@@ -209,8 +182,7 @@ namespace Sitecore.Support.sitecore.login
             this.StartPage.Attributes["src"] = urlString.ToString();
             this.StartPage.Attributes["onload"] = "javascript:this.style.display='block'";
         }
-
-        
+                
         private void RenderError(string text)
         {
             if (string.IsNullOrEmpty(text))
@@ -235,5 +207,6 @@ namespace Sitecore.Support.sitecore.login
         {
             return !Settings.Login.DisableRememberMe && this.RememberMe.Checked;
         }
+        
     }
 }
